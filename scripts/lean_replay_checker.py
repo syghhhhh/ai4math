@@ -3,9 +3,9 @@
 Reads input.json from the task folder, replays every declared input with Lean, and
 writes result.json with the strict fields the validation contract expects.
 
-Environment: AI4MATH_LEAN_PROJECT points at a project whose `.lake` has a built
-Mathlib. When set (and present) the checker uses `lake env lean`; otherwise it falls
-back to the `lean` on PATH. The fallback is recorded in `checks`/`limitations`.
+Environment: AI4MATH_LEAN_PROJECT points at a project with a `lakefile.lean`
+and built dependencies. The checker uses `lake env lean` in that project.
+Without such a project, it locates `lean` on PATH.
 """
 import hashlib
 import json
@@ -17,19 +17,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-def run_lean(path: str, project: str | None):
-    if project and Path(project, "lakefile.lean").is_file():
+
+def run_lean(argument: str, project: str | None, *, timeout: int = 1800):
+    if project:
         lake = shutil.which("lake")
         if not lake:
             raise SystemExit("lake is not on PATH")
-        cmd, cwd = [lake, "env", "lean", path], project
+        cmd = [lake, "env", "lean", argument]
     else:
         lean = shutil.which("lean")
         if not lean:
             raise SystemExit("lean is not on PATH")
-        cmd, cwd = [lean, path], None
+        cmd = [lean, argument]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=1800, cwd=cwd)
+                          errors="replace", timeout=timeout, cwd=project)
 
 
 def canonical(text):
@@ -138,6 +139,8 @@ def main() -> int:
     contract_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("input.json")
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     project = os.environ.get("AI4MATH_LEAN_PROJECT")
+    if not project or not Path(project, "lakefile.lean").is_file():
+        project = None
     all_inputs = [item["path"] for item in contract["input_artifacts"]]
     if not all_inputs:
         raise SystemExit("no input artifact")
@@ -186,12 +189,9 @@ def main() -> int:
                     raise SystemExit("Lean's kernel does not accept the node's declared lean_type as "
                                      "definitionally equal: " + expr_text[-400:])
                 expr_checked = True
-    manifest = Path(project) / "lake-manifest.json"
-    manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.is_file() else None
-    version = run_lean("-v", project) if False else subprocess.run(
-        (["lake", "env", "lean", "--version"] if Path(project).is_dir() else ["lean", "--version"]),
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
-        cwd=project if Path(project).is_dir() else None)
+    manifest = Path(project, "lake-manifest.json") if project else None
+    manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest and manifest.is_file() else None
+    version = run_lean("--version", project, timeout=300)
     runs = []
     for path in proofs:
         proc = run_lean(path, project)
@@ -216,7 +216,7 @@ def main() -> int:
                    "node Lean declaration present in the proof: " + ("yes" if declared else "not declared"),
                    "#print axioms: " + ("not reported" if axioms is None else
                                         "[" + ", ".join(axioms) + "]")],
-        "limitations": ["replays the frozen proof file in the shared Mathlib project; it does not "
+        "limitations": ["replays the frozen proof file in the selected Lean environment; it does not "
                         "re-derive the node statement digest from the Lean type",
                         "the statement binding is a canonicalised text match, not a kernel type comparison",
                         "the checker is independent of the producer but shares the workspace toolchain"],
